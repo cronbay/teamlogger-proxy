@@ -15,7 +15,6 @@ app.get('/', (req, res) => {
 });
 
 // Main proxy endpoint - forwards to TeamLogger API
-// Usage: GET /api/screenshots?employee=CT01082024&year=2026&month=5&day=22&keyValue=...&keyId=...&dayStartsAtHours=9&dayEndsAtHours=19
 app.get('/api/screenshots', async (req, res) => {
   try {
     const {
@@ -36,7 +35,6 @@ app.get('/api/screenshots', async (req, res) => {
       });
     }
 
-    // Build the TeamLogger API URL
     let tlUrl = `https://api2.teamlogger.com/api/user_screenshot_urls?employee=${encodeURIComponent(employee)}&year=${year}&month=${month}&day=${day}&timezoneOffsetMinutes=${timezoneOffsetMinutes || -330}`;
 
     if (dayStartsAtHours && Number(dayStartsAtHours) > 0) {
@@ -58,7 +56,6 @@ app.get('/api/screenshots', async (req, res) => {
     const tlResponse = await fetch(tlUrl, { headers });
     const responseText = await tlResponse.text();
 
-    // Try to parse as JSON, fall back to raw text
     let responseData;
     try {
       responseData = JSON.parse(responseText);
@@ -66,11 +63,49 @@ app.get('/api/screenshots', async (req, res) => {
       responseData = { raw: responseText };
     }
 
-    // Forward TeamLogger's status code and response back to the client
     res.status(tlResponse.status).json(responseData);
 
   } catch (error) {
     console.error('[Proxy] Error:', error.message);
+    res.status(500).json({ error: 'Proxy error', message: error.message });
+  }
+});
+
+// Claude AI analysis proxy endpoint
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const { prompt, apiKey, maxTokens } = req.body;
+
+    if (!prompt || !apiKey) {
+      return res.status(400).json({ error: 'Missing required fields: prompt, apiKey' });
+    }
+
+    const claudeResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: maxTokens || 1200,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const responseText = await claudeResponse.text();
+    let responseData;
+    try {
+      responseData = JSON.parse(responseText);
+    } catch (e) {
+      responseData = { raw: responseText };
+    }
+
+    res.status(claudeResponse.status).json(responseData);
+
+  } catch (error) {
+    console.error('[Proxy] Claude API error:', error.message);
     res.status(500).json({ error: 'Proxy error', message: error.message });
   }
 });
