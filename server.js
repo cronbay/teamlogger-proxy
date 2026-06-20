@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch');
+// Using Node 18+ native fetch (avoids node-fetch v2's "Premature close" bug on larger responses)
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,9 +50,6 @@ app.post('/api/analyze', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields: prompt, apiKey' });
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
-
     let claudeResponse;
     let lastError;
 
@@ -68,3 +65,29 @@ app.post('/api/analyze', async (req, res) => {
           body: JSON.stringify({
             model: 'claude-sonnet-4-20250514',
             max_tokens: maxTokens || 1200,
+            messages: [{ role: 'user', content: prompt }]
+          })
+        });
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        console.error(`[Proxy] Claude fetch attempt ${attempt} failed:`, err.message);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
+      }
+    }
+
+    if (lastError) throw lastError;
+
+    const responseData = await claudeResponse.json();
+    res.status(claudeResponse.status).json(responseData);
+
+  } catch (error) {
+    console.error('[Proxy] Claude API error:', error.message);
+    res.status(502).json({ error: 'Proxy error', message: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Cronbay TeamLogger Proxy running on port ${PORT}`);
+});
