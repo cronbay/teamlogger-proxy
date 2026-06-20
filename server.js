@@ -33,6 +33,9 @@ app.get('/api/screenshots', async (req, res) => {
     const tlResponse = await fetch(tlUrl, { headers });
     const responseText = await tlResponse.text();
 
+    console.log(`[Proxy] TeamLogger response status: ${tlResponse.status}`);
+    console.log(`[Proxy] TeamLogger response body (first 500 chars): ${responseText.slice(0, 500)}`);
+
     let responseData;
     try { responseData = JSON.parse(responseText); } catch (e) { responseData = { raw: responseText }; }
 
