@@ -5,16 +5,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'Cronbay TeamLogger Proxy' });
 });
 
-// Main proxy - uses TL_API_KEY env var (avoids URL encoding corruption of long JWT tokens)
+// Fetch screenshots and download images as base64 for Claude vision analysis
 app.get('/api/screenshots', async (req, res) => {
   try {
-    const { employee, year, month, day, dayStartsAtHours, dayEndsAtHours, timezoneOffsetMinutes } = req.query;
+    const { employee, year, month, day, timezoneOffsetMinutes } = req.query;
 
     const keyValue = process.env.TL_API_KEY;
     const keyId = process.env.TL_KEY_ID;
@@ -26,26 +26,65 @@ app.get('/api/screenshots', async (req, res) => {
       return res.status(400).json({ error: 'Missing required parameters: employee, year, month, day' });
     }
 
-    let tlUrl = `https://api2.teamlogger.com/api/user_screenshot_urls?employee=${encodeURIComponent(employee)}&year=${year}&month=${month}&day=${day}&timezoneOffsetMinutes=${timezoneOffsetMinutes || -330}`;
-
-    // Temporarily disabled to test if hour filters cause empty results
-// if (dayStartsAtHours && Number(dayStartsAtHours) > 0) tlUrl += `&dayStartsAtHours=${dayStartsAtHours}`;
-// if (dayEndsAtHours && Number(dayEndsAtHours) > 0 && Number(dayEndsAtHours) < 24) tlUrl += `&dayEndsAtHours=${dayEndsAtHours}`;
+    // Fetch screenshot URLs from TeamLogger (no hour filters - return all screenshots for the day)
+    const tlUrl = `https://api2.teamlogger.com/api/user_screenshot_urls?employee=${encodeURIComponent(employee)}&year=${year}&month=${month}&day=${day}&timezoneOffsetMinutes=${timezoneOffsetMinutes || -330}`;
 
     const headers = { 'Authorization': `Bearer ${keyValue}` };
     if (keyId) headers['X-API-Key-ID'] = keyId;
 
-    console.log(`[Proxy] Fetching: ${tlUrl}`);
+    console.log(`[Proxy] Fetching screenshot URLs for ${employee} on ${year}-${month}-${day}`);
 
     const tlResponse = await fetch(tlUrl, { headers });
-    const responseText = await tlResponse.text();
+    const screenshotData = await tlResponse.json();
 
-    console.log(`[Proxy] Status: ${tlResponse.status} | Body: ${responseText.slice(0, 300)}`);
+    console.log(`[Proxy] Got ${Array.isArray(screenshotData) ? screenshotData.length : 0} screenshots`);
 
-    let responseData;
-    try { responseData = JSON.parse(responseText); } catch (e) { responseData = { raw: responseText }; }
+    if (!Array.isArray(screenshotData) || screenshotData.length === 0) {
+      return res.json([]);
+    }
 
-    res.status(tlResponse.status).json(responseData);
+    // Download up to 15 screenshots as base64 for Claude vision analysis
+    // Space them evenly across the day for a representative sample
+    const maxScreenshots = 15;
+    const step = Math.ceil(screenshotData.length / maxScreenshots);
+    const sampled = screenshotData.filter((_, i) => i % step === 0).slice(0, maxScreenshots);
+
+    console.log(`[Proxy] Downloading ${sampled.length} sampled screenshots as base64...`);
+
+    const screenshotsWithImages = await Promise.all(
+      sampled.map(async (screenshot) => {
+        try {
+          const imgUrl = screenshot.screenshotUrl || screenshot.url || screenshot;
+          if (!imgUrl || typeof imgUrl !== 'string') return { ...screenshot, base64: null };
+
+          const imgResponse = await fetch(imgUrl);
+          if (!imgResponse.ok) return { ...screenshot, base64: null };
+
+          const arrayBuffer = await imgResponse.arrayBuffer();
+          const base64 = Buffer.from(arrayBuffer).toString('base64');
+          const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
+
+          return {
+            screenshotTime: screenshot.screenshotTime,
+            urlExpiresAt: screenshot.urlExpiresAt,
+            base64,
+            mediaType: contentType
+          };
+        } catch (e) {
+          console.error(`[Proxy] Failed to download screenshot:`, e.message);
+          return { screenshotTime: screenshot.screenshotTime, base64: null };
+        }
+      })
+    );
+
+    const successful = screenshotsWithImages.filter(s => s.base64);
+    console.log(`[Proxy] Successfully downloaded ${successful.length} screenshots`);
+
+    res.json({
+      total: screenshotData.length,
+      analysed: successful.length,
+      screenshots: screenshotsWithImages
+    });
 
   } catch (error) {
     console.error('[Proxy] Error:', error.message);
@@ -53,14 +92,43 @@ app.get('/api/screenshots', async (req, res) => {
   }
 });
 
-// Claude AI analysis proxy - uses apiKey from request body
+// Claude AI analysis proxy - sends images + prompt to Claude vision
 app.post('/api/analyze', async (req, res) => {
   try {
-    const { prompt, apiKey, maxTokens } = req.body;
+    const { prompt, apiKey, screenshots, maxTokens } = req.body;
 
     if (!prompt || !apiKey) {
       return res.status(400).json({ error: 'Missing required fields: prompt, apiKey' });
     }
+
+    // Build message content - include actual images if available
+    let messageContent = [];
+
+    if (screenshots && screenshots.length > 0) {
+      const validScreenshots = screenshots.filter(s => s.base64);
+      console.log(`[Proxy] Sending ${validScreenshots.length} images to Claude for visual analysis`);
+
+      // Add each screenshot image
+      for (const screenshot of validScreenshots) {
+        if (screenshot.screenshotTime) {
+          messageContent.push({
+            type: 'text',
+            text: `Screenshot taken at: ${screenshot.screenshotTime}`
+          });
+        }
+        messageContent.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: screenshot.mediaType || 'image/jpeg',
+            data: screenshot.base64
+          }
+        });
+      }
+    }
+
+    // Add the analysis prompt at the end
+    messageContent.push({ type: 'text', text: prompt });
 
     let claudeResponse;
     let lastError;
@@ -76,8 +144,8 @@ app.post('/api/analyze', async (req, res) => {
           },
           body: JSON.stringify({
             model: 'claude-sonnet-4-6',
-            max_tokens: maxTokens || 1200,
-            messages: [{ role: 'user', content: prompt }]
+            max_tokens: maxTokens || 1500,
+            messages: [{ role: 'user', content: messageContent }]
           })
         });
         lastError = null;
