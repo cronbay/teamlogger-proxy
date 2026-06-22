@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-// Using Node 18+ native fetch (avoids node-fetch v2's "Premature close" bug on larger responses)
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,12 +11,19 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'Cronbay TeamLogger Proxy' });
 });
 
+// Main proxy - uses TL_API_KEY env var (avoids URL encoding corruption of long JWT tokens)
 app.get('/api/screenshots', async (req, res) => {
   try {
-    const { employee, year, month, day, keyValue, keyId, dayStartsAtHours, dayEndsAtHours, timezoneOffsetMinutes } = req.query;
+    const { employee, year, month, day, dayStartsAtHours, dayEndsAtHours, timezoneOffsetMinutes } = req.query;
 
-    if (!employee || !year || !month || !day || !keyValue) {
-      return res.status(400).json({ error: 'Missing required parameters: employee, year, month, day, keyValue' });
+    const keyValue = process.env.TL_API_KEY;
+    const keyId = process.env.TL_KEY_ID;
+
+    if (!keyValue) {
+      return res.status(500).json({ error: 'TL_API_KEY not configured in server environment' });
+    }
+    if (!employee || !year || !month || !day) {
+      return res.status(400).json({ error: 'Missing required parameters: employee, year, month, day' });
     }
 
     let tlUrl = `https://api2.teamlogger.com/api/user_screenshot_urls?employee=${encodeURIComponent(employee)}&year=${year}&month=${month}&day=${day}&timezoneOffsetMinutes=${timezoneOffsetMinutes || -330}`;
@@ -28,27 +34,29 @@ app.get('/api/screenshots', async (req, res) => {
     const headers = { 'Authorization': `Bearer ${keyValue}` };
     if (keyId) headers['X-API-Key-ID'] = keyId;
 
-    console.log(`[Proxy] Fetching: ${tlUrl.replace(keyValue, '***')}`);
+    console.log(`[Proxy] Fetching: ${tlUrl}`);
 
     const tlResponse = await fetch(tlUrl, { headers });
     const responseText = await tlResponse.text();
 
-    console.log(`[Proxy] TeamLogger response status: ${tlResponse.status}`);
-    console.log(`[Proxy] TeamLogger response body (first 500 chars): ${responseText.slice(0, 500)}`);
+    console.log(`[Proxy] Status: ${tlResponse.status} | Body: ${responseText.slice(0, 300)}`);
 
     let responseData;
     try { responseData = JSON.parse(responseText); } catch (e) { responseData = { raw: responseText }; }
 
     res.status(tlResponse.status).json(responseData);
+
   } catch (error) {
     console.error('[Proxy] Error:', error.message);
     res.status(500).json({ error: 'Proxy error', message: error.message });
   }
 });
 
+// Claude AI analysis proxy - uses apiKey from request body
 app.post('/api/analyze', async (req, res) => {
   try {
     const { prompt, apiKey, maxTokens } = req.body;
+
     if (!prompt || !apiKey) {
       return res.status(400).json({ error: 'Missing required fields: prompt, apiKey' });
     }
@@ -75,7 +83,7 @@ app.post('/api/analyze', async (req, res) => {
         break;
       } catch (err) {
         lastError = err;
-        console.error(`[Proxy] Claude fetch attempt ${attempt} failed:`, err.message);
+        console.error(`[Proxy] Claude attempt ${attempt} failed:`, err.message);
         if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt));
       }
     }
