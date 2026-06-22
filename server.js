@@ -28,8 +28,9 @@ app.get('/api/screenshots', async (req, res) => {
 
     let tlUrl = `https://api2.teamlogger.com/api/user_screenshot_urls?employee=${encodeURIComponent(employee)}&year=${year}&month=${month}&day=${day}&timezoneOffsetMinutes=${timezoneOffsetMinutes || -330}`;
 
-    if (dayStartsAtHours && Number(dayStartsAtHours) > 0) tlUrl += `&dayStartsAtHours=${dayStartsAtHours}`;
-    if (dayEndsAtHours && Number(dayEndsAtHours) > 0 && Number(dayEndsAtHours) < 24) tlUrl += `&dayEndsAtHours=${dayEndsAtHours}`;
+    // Temporarily disabled to test if hour filters cause empty results
+// if (dayStartsAtHours && Number(dayStartsAtHours) > 0) tlUrl += `&dayStartsAtHours=${dayStartsAtHours}`;
+// if (dayEndsAtHours && Number(dayEndsAtHours) > 0 && Number(dayEndsAtHours) < 24) tlUrl += `&dayEndsAtHours=${dayEndsAtHours}`;
 
     const headers = { 'Authorization': `Bearer ${keyValue}` };
     if (keyId) headers['X-API-Key-ID'] = keyId;
