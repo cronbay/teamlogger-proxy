@@ -68,7 +68,7 @@ app.get('/api/screenshots', async (req, res) => {
             screenshotTime: screenshot.screenshotTime,
             urlExpiresAt: screenshot.urlExpiresAt,
             base64,
-            mediaType: contentType
+            mediaType: 'image/jpeg'
           };
         } catch (e) {
           console.error(`[Proxy] Failed to download screenshot:`, e.message);
